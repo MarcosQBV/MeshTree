@@ -1,0 +1,17 @@
+body {
+    background-color: black;
+}
+.App {
+    background-color: white;
+    border-radius: 15px;
+    padding: 1em;
+}
+
+h1{
+    margin-bottom: 20px;
+}
+
+.sigma-container {
+    width: 100%;
+    height: 750px;
+}
