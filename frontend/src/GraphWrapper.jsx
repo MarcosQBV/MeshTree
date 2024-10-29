@@ -42,10 +42,10 @@ async function fetchDataForKey(key) {
 function defineEdges(data, centralNodeId) {
   const edges = [];
   data.children.forEach((child) => {
-    edges.push({ source: child.id, target: centralNodeId });
+    edges.push({ source: centralNodeId, target: child.id });
   });
   data.parents.forEach((parent) => {
-    edges.push({ source: centralNodeId, target: parent.id });
+    edges.push({ source: parent.id, target: centralNodeId });
   });
   return edges;
 }
@@ -54,10 +54,15 @@ const GraphComponent = () => {
   let centralNodeLabel = 'Root';
   const sigma = useSigma();
   const containerRef = useRef(null);
+  const graphRef = useRef(new Graph()); // Persistent graph instance
   const [centralNode, setCentralNode] = useState({ id: 'Root', label: 'Root' });
   const [parentNodes, setParentNodes] = useState([]);
   const [childNodes, setChildNodes] = useState([]);
   const [edges, setEdges] = useState([]);
+  const [nodeLevel, setNodeLevel] = useState([]); // Initialize nodeLevel as a state
+  const [centerX, setCenterX] = useState(0); // State for center X coordinate
+  const [centerY, setCenterY] = useState(0); // State for center Y coordinate
+  const [collapsedNodes, setCollapsedNodes] = useState(new Set()); // Track collapsed nodes and their children
 
   // Function to get the label by node ID
   function getNodeLabelById(nodeId, nodes) {
@@ -69,14 +74,102 @@ const GraphComponent = () => {
   const handleNodeClick = (nodeId) => {
     centralNodeLabel = getNodeLabelById(nodeId, [...parentNodes, ...childNodes]);
     setCentralNode({ id: nodeId, label: centralNodeLabel });
+
+    // Get the coordinates of the clicked node
+    const nodeAttributes = graphRef.current.getNodeAttributes(nodeId);
+    setCenterX(nodeAttributes.x);
+    setCenterY(nodeAttributes.y);
+    
+    const handleNodeClick = (nodeId) => {
+      const newLabel = getNodeLabelById(nodeId, [...parentNodes, ...childNodes]);
+      console.log(`Node clicked: ${nodeId}, Label: ${newLabel}`);
+    
+      if (newLabel) {
+        setCentralNode({ id: nodeId, label: newLabel });
+    
+        // Get the coordinates of the clicked node
+        const nodeAttributes = graphRef.current.getNodeAttributes(nodeId);
+        setCenterX(nodeAttributes.x);
+        setCenterY(nodeAttributes.y);
+    
+        // Remove the node from the collapsed nodes set to allow re-expansion
+        setCollapsedNodes((prevCollapsed) => {
+          const newCollapsed = new Set(prevCollapsed);
+          newCollapsed.delete(nodeId);
+          console.log('Collapsed nodes after click:', newCollapsed);
+          return newCollapsed;
+        });
+      } else {
+        console.warn(`Node label not found for ID: ${nodeId}`);
+      }
+    };
+    
+
+    // Remove the node from the collapsed nodes set to allow re-expansion
+    setCollapsedNodes((prevCollapsed) => {
+      const newCollapsed = new Set(prevCollapsed);
+      newCollapsed.delete(nodeId);
+      console.log(newCollapsed);
+      return newCollapsed;
+    });
+  };
+
+  // Function to handle right-click on nodes
+  const handleNodeRightClick = (nodeId) => {
+    collapseNodeAndDescendants(nodeId);
+  };
+
+  // Function to collapse a node and its descendants
+  const collapseNodeAndDescendants = (nodeId) => {
+    const graph = graphRef.current;
+    const nodesToRemove = new Set();
+    const edgesToRemove = new Set();
+
+    // Collect direct children of the node
+    graph.forEachOutboundNeighbor(nodeId, (neighbor) => {
+      nodesToRemove.add(neighbor);
+    });
+
+    // Collect all edges connected to these nodes
+    nodesToRemove.forEach((node) => {
+      graph.forEachEdge(node, (edgeId, attributes, source, target) => {
+        edgesToRemove.add(edgeId);
+      });
+    });
+
+    // Remove all collected edges and nodes
+    edgesToRemove.forEach((edgeId) => {
+      if (graph.hasEdge(edgeId)) {
+        graph.dropEdge(edgeId);
+      }
+    });
+    nodesToRemove.forEach((node) => {
+      if (graph.hasNode(node)) {
+        graph.dropNode(node);
+      }
+    });
+
+    // Add the node and its children to the collapsed nodes set
+    setCollapsedNodes((prevCollapsed) => {
+      const newCollapsed = new Set(prevCollapsed);
+      newCollapsed.add(nodeId);
+      nodesToRemove.forEach((node) => newCollapsed.add(node));
+      console.log(newCollapsed);
+      return newCollapsed;
+    });
+
+    // Refresh the graph
+    sigma.refresh();
   };
 
   // Function to add nodes and edges with a delay
-  async function addNodesAndEdgesWithDelay(nodes, graph, centerX, centerY, startAngle, angleSpread, radius, edges) {
+  async function addNodesAndEdgesWithDelay(nodes, graph, parentX, parentY, startAngle, angleSpread, radius, edges, level) {
     for (const [index, node] of nodes.entries()) {
+      if (collapsedNodes.has(node.id)) continue; // Skip adding collapsed nodes
+
       const angle = startAngle + (index * angleSpread) / Math.max(1, nodes.length - 1);
-      const x = centerX + radius * Math.cos(angle);
-      const y = centerY + radius * Math.sin(angle);
+      const x = parentX + radius * Math.cos(angle);
+      const y = parentY + radius * Math.sin(angle);
       if (!graph.hasNode(node.id)) {
         graph.addNode(node.id, {
           label: node.label,
@@ -86,12 +179,18 @@ const GraphComponent = () => {
           x: x,
           y: y
         });
+
+        // Add node level information
+        setNodeLevel((prevNodeLevel) => [
+          ...prevNodeLevel,
+          { id: node.id, label: node.label, level: level }
+        ]);
       }
       await sleep(100); // Wait for 200ms
 
       // Add edges related to this node
       edges.forEach(edge => {
-        if (edge.source === node.id || edge.target === node.id) {
+        if ((edge.source === node.id || edge.target === node.id) && !collapsedNodes.has(edge.source) && !collapsedNodes.has(edge.target)) {
           if (!graph.hasEdge(edge.source, edge.target)) {
             try {
               graph.addEdge(edge.source, edge.target);
@@ -110,39 +209,45 @@ const GraphComponent = () => {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  // Effect to fetch data when central node changes
   useEffect(() => {
     if (!centralNode.id) return; // Ensure there's an ID
-
+  
+    console.log(`Fetching data for central node: ${centralNode.id}`);
     fetchDataForKey(centralNode.id)
       .then((data) => {
         const parents = data.parents.map(({ id, label }) => ({
           id: id,
           label: label
         }));
-
+  
         const children = data.children.map(({ id, label }) => ({
           id: id,
           label: label
         }));
-
+  
+        console.log('Fetched children:', children);
         setParentNodes(parents);
         setChildNodes(children);
         setEdges(defineEdges(data, centralNode.id));
+  
+        // Remove children from the collapsed nodes set
+        setCollapsedNodes((prevCollapsed) => {
+          const newCollapsed = new Set(prevCollapsed);
+          children.forEach((child) => newCollapsed.delete(child.id));
+          console.log('Updated collapsedNodes:', newCollapsed);
+          return newCollapsed;
+        });
       })
       .catch((error) => {
-        console.error('Error:', error);
+        console.error('Error fetching data:', error);
       });
-  }, [centralNode.id]);
+  }, [centralNode.id]); // Trigger fetching whenever centralNode.id changes
 
   // Effect to update graph visualization
   useEffect(() => {
-    // Create a new graph instance
-    const graph = new Graph();
+    const graph = graphRef.current; // Use the persistent graph instance
 
-    // Add central node
-    const centerX = 0;
-    const centerY = 0;
+    // Add central node if it doesn't exist
     if (!graph.hasNode(centralNode.id)) {
       graph.addNode(centralNode.id, {
         label: centralNode.label,
@@ -152,37 +257,46 @@ const GraphComponent = () => {
         x: centerX,
         y: centerY
       });
+
+      // Add central node level information
+      setNodeLevel([{ id: centralNode.id, label: centralNode.label, level: 0 }]);
     }
 
     // Add parent nodes and edges with delay
     const parentAngleSpread = Math.PI / 2;
     const parentRadius = 100;
     const parentStartAngle = 3 * Math.PI / 4;
-    addNodesAndEdgesWithDelay(parentNodes, graph, centerX, centerY, parentStartAngle, parentAngleSpread, parentRadius, edges);
+    addNodesAndEdgesWithDelay(parentNodes, graph, centerX, centerY, parentStartAngle, parentAngleSpread, parentRadius, edges, 1);
 
     // Add child nodes and edges with delay
     const childAngleSpread = Math.PI / 2;
     const childRadius = 100;
     const childStartAngle = 7 * Math.PI / 4;
-    addNodesAndEdgesWithDelay(childNodes, graph, centerX, centerY, childStartAngle, childAngleSpread, childRadius, edges);
+    addNodesAndEdgesWithDelay(childNodes, graph, centerX, centerY, childStartAngle, childAngleSpread, childRadius, edges, 1);
 
     // Clear any existing click handlers
     sigma.removeAllListeners('clickNode');
-    
+
     // Set up click handler
     sigma.on('clickNode', (event) => {
       handleNodeClick(event.node);
     });
 
-    // Clear the existing graph and set the new one
+    // Set up right-click handler
+    sigma.on('rightClickNode', (event) => {
+      handleNodeRightClick(event.node);
+    });
+
+    // Set the graph to Sigma and refresh
     sigma.setGraph(graph);
     sigma.refresh();
 
     // Cleanup function
     return () => {
       sigma.removeAllListeners('clickNode');
+      sigma.removeAllListeners('rightClickNode');
     };
-  }, [sigma, parentNodes, childNodes, edges, centralNode]);
+  }, [sigma, parentNodes, childNodes, edges, centralNode, centerX, centerY, collapsedNodes]);
 
   return <div ref={containerRef} />;
 };
